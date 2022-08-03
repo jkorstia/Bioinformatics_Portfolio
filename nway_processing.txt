@@ -1,0 +1,348 @@
+# nway processing
+# Jenny Korstian
+# May 5, 2020
+
+#############################################
+# This script will further process output files from the nway tool (tables & fasta alignments).  
+# Nway outputs must be pre-processed using nway_preprocessing.sh before using this script.
+# For each putative locus, blast will be used to verify nway genotypes and to pull homologous sequences for each locus from additional reference species not examined during the nway search.  
+# For each putative locus, blast will also be used to filter so that only the most promising loci are selected for manual evaluation for potential use in constructing TE based phylogenies.  
+# Final outputs include an updated, aligned fasta file for each locus (fasta headers will contain genotype and filtering information) and a summary table for each locus
+
+# add usage statement
+
+#############################################
+############## Import modules ###############
+#############################################
+import argparse
+import os
+import glob
+import subprocess
+from Bio import SeqIO, AlignIO
+from Bio.Align import AlignInfo
+import pandas as pd
+from pybedtools import BedTool
+#import logging
+#import time
+#import datetime
+
+##############################################
+################## Arguments #################
+##############################################
+
+
+parser = argparse.ArgumentParser(description="Will further process output files from the nway tool (tables & fasta alignments).  For each putative locus, blast will be used to verify nway genotypes and to pull homologous sequences for each locus from additional reference species not examined during the nway search.  For each putative locus, blast will also be used to filter so that only the most promising loci are selected for manual evaluation for potential use in constructing TE based phylogenies.  Final outputs include an updated, aligned fasta file for each locus (fasta headers will contain genotype and filtering information) and a summary table for each locus", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument('-q', '--focal_species', type=str, help='Name of the species used for TEcoordinates in the nway search that generated this data. Case sensitive, no caps.', required=True)
+parser.add_argument('-l', '--library', type=str, help='Library of TE consensus sequences to be used as blast queries for genotyping and inclusion in final alignments.  Must be in oneline fasta format.', required = True)
+parser.add_argument('-b', '--basedir', type=str, help='Full path to base directory.', required = True)
+parser.add_argument('-o', '--outdir', type=str, help='Full path to the output directory for updated locus fasta alignments.', required = True)
+parser.add_argument('-r', '--rawdir', type=str, help='Full path to the source directory for raw locus fasta alignments.', required = True)
+parser.add_argument('-g', '--genomedir', type=str, help='Full path to the directory containing indexed fasta genome files to query. Must be in fasta format with no # or / or spaces in the headers.', required = True)
+parser.add_argument('-c', '--config', type=str, help='Full path to the CSV config file listing <Genus_species><name_of_genome_file>,<species_to_use_as_query>,<nway_genotype_column> for each species, one per line.', required = True)
+parser.add_argument('-n', '--nwaycsv', type=str, help='Full path to the preprocessed nway data table in CSV format.', required = True)
+parser.add_argument('-s', '--samples', type=str, help='Full path to a list of fasta files to be processed, one file per line.', required = True)
+parser.add_argument('-f', '--flank', type=int, help='The number of bp of buffer to allow when determining if a locus is in an appropriate location. Optional, Default = 50', default = 50)
+parser.add_argument('-m', '--minlength', type=int, help='The minimum length allowable for blast hits kept for use in genotyping. Optional, Default = 100', default = 100)
+parser.add_argument('-p', '--identity', type=int, help='The minimum percent identity threshold for blast hits used in genotyping. Optional, Default = 70.', default = 70)
+parser.add_argument('-a', '--aligner', type=str, help='Full path to muscle software.', required = True)	
+parser.add_argument('-x', '--blast', type=str, help='Full path to blast software.', required = True)
+
+args = parser.parse_args()
+FOCAL_SPECIES = args.focal_species
+BASEDIR = args.basedir
+OUTDIR = args.outdir
+SOURCEDIR = args.rawdir
+GENOMEDIR = args.genomedir
+CONFIG = args.config
+NWAYPATH = args.nwaycsv
+LIST_PATH = args.samples
+LIB_PATH = args.library
+BUFFER = args.flank
+PIDENT_MIN = args.identity
+MINLEN = args.minlength
+MUSCLE_PATH = args.aligner
+BLAST_PATH = args.blast
+
+# define additional variables based on argument variables
+TEMP=BASEDIR+"/temp"
+WINDOW_START=500-BUFFER
+BLAST_GENOTYPE=()
+
+##############################################
+#########    set-up directories	   ###########
+##############################################
+#check if output directory exists, if not, create it
+if not os.path.isdir(OUTDIR):
+	os.makedirs(OUTDIR)
+	print("created folder : ", OUTDIR)
+else:
+	print(OUTDIR, "folder already exists.")
+#check if temp directory exists in the basedir, if not, create it
+if not os.path.isdir(TEMP):
+	os.makedirs(TEMP)
+	print("created folder : ", TEMP)
+else:
+	print(TEMP, "folder already exists.")
+
+##############################################
+##########  Read in input files ##############
+##############################################
+# Import config file
+fields = ["Genus_species", "GenomeFileName", "QuerySpecies"]
+c = pd.read_csv(CONFIG, names=fields)
+c[['Genus','Species']] = c.Genus_species.str.split("_",expand=True) # use the Genus_species column to create separate genus and species columns
+targets=c.groupby('QuerySpecies')['Species'].apply(list).to_dict() # create a dictionary from the config file consisting of a list of species (targets) that need homologs pulled for each of the nway species
+c=c.set_index('Species') # set Species as the index for the config table
+config=c.to_dict('index') # convert config table into a dictionary for easier data retrieval
+nway = pd.read_csv(NWAYPATH, index_col=0, header=0).to_dict() # Import nway table as a dictionary
+REF_SPECIES=list(nway.keys())[3] # pull name of reference species from the nway table, based on position (ref species is always first)
+print("the reference species is: "+REF_SPECIES)
+
+# Import list of samples to process
+fastalist = []
+with open(LIST_PATH, 'r') as f:
+	fastalist=f.read().splitlines()
+
+##############################################
+##########	  Define Functions	 #############
+##############################################
+
+# function: get ELEMENT consensus from LIB and write to fasta file in TEMP in the correct orientation
+def get_element_consensus():
+	with open(LIB_PATH, "r") as handle:
+		for record in SeqIO.parse(handle, "fasta"):
+			found=record.name
+			found=found.split("#",1)[0] # strip off everything after the # in the element header
+			if found == ELEMENT: # select the desired element from the fasta library based on the header and the ELEMENT variable
+				if ORIENTATION == 'C':
+					print("unaltered record is:")
+					print(record)
+					#sequence must get reverse complement of sequence
+					RC=record.reverse_complement(id=record.id+"_reverse_complement", name=record.name+"_reverse_complement", description=record.description+"_reverse_complement")
+					print("after reverse complementing, the record looks like this:")
+					print(RC)
+					SeqIO.write(RC, TEMP+"/consensus", "fasta") # write reverse complement of consensus to fasta file in TEMP
+				else:
+					SeqIO.write(record, TEMP+"/consensus", "fasta") # write consensus to fasta file in TEMP
+
+# function: create consensus sequences for 
+def get_nway_consensuses():
+#create and open consensus file to write consensuses to
+	with open(LOCUS+"_consensuses","w+") as f:
+	#align all nway species with + genotypes & create consensus
+		SeqIO.write(WITH_TE, LOCUS+"_withTE", "fasta")
+		subprocess.call(MUSCLE_PATH + '/muscle -in {} -out {}'.format(TEMP+"/"+LOCUS+'_withTE', TEMP+"/"+LOCUS+'_aligned_withTE'), shell=True)
+		with_te_alignment=AlignIO.read(open(LOCUS+"_aligned_withTE"), "fasta")
+		summary_align=AlignInfo.SummaryInfo(with_te_alignment)
+		with_te_consensus = ">with_TE_consensus\n%s\n" % (summary_align.dumb_consensus(ambiguous='N', require_multiple=1))
+		w=open("withTE_consensus","w+")
+		w.write(with_te_consensus)
+		w.close()
+		f.write(with_te_consensus)
+	#align all nway species with - genotypes & create consensus
+		SeqIO.write(LOCUS_FLANKS, LOCUS+"_flanks", "fasta")
+		subprocess.call(MUSCLE_PATH + '/muscle -in {} -out {}'.format(LOCUS+'_flanks', LOCUS+'_aligned_flanks'), shell=True)
+		flank_alignment=AlignIO.read(open(LOCUS+"_aligned_flanks"), "fasta")
+		summary_align=AlignInfo.SummaryInfo(flank_alignment)
+		flank_consensus = ">flank_consensus\n%s\n" %  (summary_align.dumb_consensus(ambiguous='N', require_multiple=1))
+		f.write(flank_consensus)
+		for record in SeqIO.parse("withTE_consensus","fasta"):
+				#get left 500 bp flank of consensus
+			l_flank_fasta=">L_flank_consensus\n%s\n" % (record.seq[0:499])
+				#get right 500 bp flank of consensus
+			r_flank_start=len(record.seq)-500
+			r_flank_fasta=">R_flank_consensus\n%s\n" % (record.seq[r_flank_start:len(record.seq)])
+				#add l_flank and r_flank sequences to the LOCUS_consensuses fasta file
+			f.write(l_flank_fasta+r_flank_fasta)
+			f.close()
+			
+# function: get homologs from nway species using blast and extract align.  will create a blast.out file and a fasta file for each 
+def get_homologs():
+	# build blast database containing +consensus, -consensus, and QUERY_SPECIES
+	subprocess.call('cat {} {} >{}'.format(LOCUS+'_consensuses', QUERY_SPECIES+'.fa', 'db'), shell=True)
+	# blast database against target species genome
+	subprocess.call(BLAST_PATH+' -task {} -db {} -query {} -out {} -outfmt 6 -max_target_seqs 1 -max_hsps 1'.format('dc-megablast', GENOME_PATH, 'db', TARGET+'lib.out'), shell=True)
+# NOTE: if blast file is empty, no acceptable blast hit was found for either the insertion or the flanking region
+	if os.stat(TARGET+'lib.out').st_size != 0:	# make a bed file from the best blast hit if one exists
+		b=pd.read_csv(TARGET+'lib.out', sep='\t', names=['queryname', 'scaff', 'pident', 'length', 'mismatch', 'gapopen', 'querystart', 'querystop', 'start_in_genome', 'stop_in_genome', 'evalue', 'bitscore']).to_dict()
+		# get the most extreme start and stop positions of among all of the blast hits
+		g_start=b['start_in_genome']
+		starts_list=list(g_start.values())
+		g_stop=b['stop_in_genome']
+		stops_list=list(g_stop.values())
+		all_coords=starts_list + stops_list
+		# get the smallest start position of all of the blast hits
+		min_start=min(all_coords)
+		# get the largest stop position of all of the blast hits
+		max_stop=max(all_coords)
+		# find the length of the "max window" using first_start and last_stop
+		max_window_length=abs(max_stop-min_start)
+		# get the row index of the longest hit
+		lengths=b['length']
+		longest_hit_row=max(lengths, key=lengths.get)
+		# find the length of the longest single hit in the blast results
+		length_of_longest_hit=b['length'][longest_hit_row]
+		# get a list of scaffolds
+		g_scaffs=b['scaff']
+		scaff_list=list(g_scaffs.values())	
+		# check to make sure all start and stop positions are on the same scaffold
+		ele = scaff_list[0]
+		chk = True
+		for item in scaff_list:
+			if ele != item:
+				chk = False
+				break;
+		# if chk == True, all hits are on same scaffold and can be evaluated to see if expansion of start/stop coordinates is necessary and/or possible
+		if (chk == True):		
+			if length_of_longest_hit >= max_window_length:
+				# the longest single hit will be extracted from the genome
+				if b['start_in_genome'][longest_hit_row] >= b['stop_in_genome'][longest_hit_row]:
+					#blast hit is in reverse orientation & start and stop coordinates will need to be swapped
+					homolog_orientation='-'
+					bed=BedTool(b['scaff'][longest_hit_row]+"\t"+str(b['stop_in_genome'][longest_hit_row])+"\t"+str(b['start_in_genome'][longest_hit_row]), from_string=True)
+				else:
+					#blast hit is in correct orientation & no swapping is necessary
+					bed=BedTool(b['scaff'][longest_hit_row]+"\t"+str(b['start_in_genome'][longest_hit_row])+"\t"+str(b['stop_in_genome'][longest_hit_row]), from_string=True)	
+			else:
+			# hit will be expanded to max_window coordinates to (hopefully) include both L & R flanking regions
+				if max_stop <= min_start:
+				#blast hit is in reverse orientation & start and stop coordinates will need to be swapped
+					homolog_orientation='-'
+					bed=BedTool(b['scaff'][longest_hit_row]+"\t"+str(max_stop)+"\t"+str(min_start), from_string=True)
+				else:
+				# blast hit is in correct orientation & no swapping is necessary
+					bed=BedTool(b['scaff'][longest_hit_row]+"\t"+str(min_start)+"\t"+str(max_stop), from_string=True)
+		# if chk = False, one or more hits are on different scaffolds, so the longest single hit should be used
+		else:
+				# the longest single hit will be extracted from the genome
+			if b['start_in_genome'][longest_hit_row] >= b['stop_in_genome'][longest_hit_row]:
+				#blast hit is in reverse orientation & start and stop coordinates will need to be swapped
+				homolog_orientation='-'
+				bed=BedTool(b['scaff'][longest_hit_row]+"\t"+str(b['stop_in_genome'][longest_hit_row])+"\t"+str(b['start_in_genome'][longest_hit_row]), from_string=True)
+			else:
+				#blast hit is in correct orientation & no swapping is necessary
+				bed=BedTool(b['scaff'][longest_hit_row]+"\t"+str(b['start_in_genome'][longest_hit_row])+"\t"+str(b['stop_in_genome'][longest_hit_row]), from_string=True)
+		# use bedtools to extract the specified region from the genome file & save to a file
+		fa=bed.sequence(fi=GENOME_PATH)
+		fasave=bed.save_seqs(TARGET+'.fa')
+		# open the recently saved file and correct the header formatting for downstream use (this will replace the contig info with the species info in the header)
+		with open(TARGET+".fa", "r") as handle:
+			for record in SeqIO.parse(handle, "fasta"):
+				record.id=TARGET
+				record.name=""
+				record.description=""
+				SeqIO.write(record, TARGET+".fa", "fasta") 
+# function: determine blast genotypes for the specified fasta file
+def get_blast_genotype(PATH_TO_FASTA_TO_GENOTYPE, OUTPUT_BASENAME):
+	subprocess.call(BLAST_PATH+' -task {} -db {} -query {} -out {} -outfmt 6 -max_target_seqs 1 -max_hsps 1'.format('dc-megablast', LIB_PATH, PATH_TO_FASTA_TO_GENOTYPE, OUTPUT_BASENAME+'TE.out'), shell=True) # use blast to find the best match from TELIB for the specified file
+#### Determine blast genotype based on TEblast output
+	global BLAST_GENOTYPE
+	if (os.stat(OUTPUT_BASENAME+'TE.out').st_size == 0):
+		#Empty file exists
+		BLAST_GENOTYPE="Blast0_NotFound"
+	else:
+		#Non empty file exists
+		b=pd.read_csv(OUTPUT_BASENAME+'TE.out', sep='\t', names=['queryname', 'element', 'pident', 'length', 'mismatch', 'gapopen', 'querystart', 'querystop', 'start_in_te', 'stop_in_te', 'evalue', 'bitscore']).to_dict()
+		ELEMENT_FOUND=b['element'][0]
+		ELEMENT_FOUND=ELEMENT_FOUND.split("#",1)[0] # strip off everything after the # in the element header
+		PIDENT=int(b['pident'][0])
+		TE_LENGTH=b['length'][0]
+		START=b['querystart'][0]
+		STOP=b['querystop'][0]
+		WINDOW_END=SEQ_LENGTH-500+BUFFER
+		if (STOP <= WINDOW_START) or (START >= WINDOW_END):
+			#print("a blast hit exists, but is in primarily in the flanking sequence")
+			BLAST_GENOTYPE="Blast0_Out_of_Range"
+		elif (ELEMENT_FOUND != ELEMENT):
+			#print("Element found does not match the expected TE!")
+			BLAST_GENOTYPE="BlastN_wrongTE_"+ELEMENT_FOUND
+		elif (PIDENT >= PIDENT_MIN) and (TE_LENGTH >= MINLEN):
+			#print("a blast hit exists in the correct location and is at least MINLEN bp and at least PIDENT_MIN % identity")
+			BLAST_GENOTYPE="Blast1_L"+str(TE_LENGTH)+"_P"+str(PIDENT)
+		elif (TE_LENGTH >= MINLEN):
+			#a blast hit exists in the correct location that is an appropriate length
+			if (PIDENT <= PIDENT_MIN):
+				#print("a blast hit of appropriate length exists in the correct location but is a poor match")
+				BLAST_GENOTYPE="BlastN_BadMatch_L"+str(TE_LENGTH)+"_P"+str(PIDENT)
+		else:
+			#print("a blast hit exists in the correct location but is too short")
+			BLAST_GENOTYPE="BlastN_TooShort_L"+str(TE_LENGTH)+"_P"+str(PIDENT)
+	return BLAST_GENOTYPE
+	
+
+##############################################
+##########	  Do the things		 #############
+##############################################
+
+# move so that the files are created in the TEMP directory
+os.chdir(TEMP)
+
+# iterate through each of the nway fastas in the user-supplied sample list
+for nwayfasta in fastalist:
+	LOCUS=nwayfasta.rsplit( ".", 1 )[ 0 ] # get locus name (this will strip off file extensions)
+	ORIENTATION=(nway['Orientation'][LOCUS])# get the orientation from the nway table
+	ELEMENT=(nway['Element'][LOCUS])# get the element name from the nway table
+	print("Beginning work on locus: "+LOCUS+", which had a "+ELEMENT+" in a "+ORIENTATION+" orientation") 
+	print("Getting "+ELEMENT+" consensus sequence.")
+	get_element_consensus()
+	with open(SOURCEDIR+"/"+nwayfasta, "r") as handle:
+		NWAY_SPECIES_LIST=[]
+		LOCUS_FLANKS=[]
+		WITH_TE=[]
+		for record in SeqIO.parse(handle, "fasta"):
+			QUERY_SPECIES=record.id	# get species name of each sequence in the nwayfasta
+			NWAY_SPECIES_LIST.append(QUERY_SPECIES) # build a list of the nway species 
+			SEQ_LENGTH=len(record.seq)
+		# write a fasta file in the temp directory for each species found in the nway alignment
+			SeqIO.write(record, TEMP+"/"+QUERY_SPECIES+".fa", "fasta")  
+		 # get nway genotype for this species from the nway table.  this loop also automatically assigns the - genotype for all loci to the reference species in reverse nway runs.
+			if REF_SPECIES == FOCAL_SPECIES:
+				NWAY_GENOTYPE=(nway[QUERY_SPECIES][LOCUS])
+			elif REF_SPECIES == QUERY_SPECIES:
+				NWAY_GENOTYPE='-'
+			else:
+				NWAY_GENOTYPE=(nway[QUERY_SPECIES][LOCUS])
+			print("Getting blast genotype for the nway species ",QUERY_SPECIES)
+			get_blast_genotype(QUERY_SPECIES+'.fa', QUERY_SPECIES)
+		# update QUERY.fa sequence to include genotype info in the header
+			record.id=QUERY_SPECIES+"_Nway"+NWAY_GENOTYPE+"_"+BLAST_GENOTYPE
+			record.description=""
+			record.name=""
+		# update nway fasta file with genotype info 
+			SeqIO.write(record, TEMP+"/"+QUERY_SPECIES+".fa", "fasta") 		
+		# add sequence to flank consensus file if nway genotype is "-"
+			if NWAY_GENOTYPE == '-':
+				LOCUS_FLANKS.append(record)
+			else:
+				WITH_TE.append(record)
+	get_nway_consensuses()
+	for QUERY_SPECIES in NWAY_SPECIES_LIST:
+		if QUERY_SPECIES in targets: # for each of the nway species
+			PULL=(targets[QUERY_SPECIES])	# make a list of the target species to pull
+			print(QUERY_SPECIES+" needs to be blasted against the "+str(PULL)+" genomes to pull homologs")
+			for TARGET in PULL:
+				print("-----------------------------------------------------------------------------")
+				print(TARGET)
+				GENOME=(config[TARGET]['GenomeFileName']) # retrieve the genome file name to query from the config file
+				GENOME_PATH=GENOMEDIR+"/"+GENOME # build full path to genome file to query
+				print(GENOME_PATH)
+				get_homologs() # run the get_homologs function
+				BLAST_GENOTYPE=get_blast_genotype(QUERY_SPECIES+'.fa', TARGET)
+				print('Blast genotype for '+TARGET+' is : '+BLAST_GENOTYPE)
+				NWAY_GENOTYPE="NA"
+				print('Nway genotype is:'+NWAY_GENOTYPE)
+				with open(QUERY_SPECIES+".fa", "r") as handle:
+					for record in SeqIO.parse(handle, "fasta"):
+						record.id=TARGET+"_Nway"+NWAY_GENOTYPE+"_"+BLAST_GENOTYPE
+						record.description=""
+						record.name=""
+						SeqIO.write(record, TEMP+"/"+TARGET+".fa", "fasta") # write extracted sequence with genotype info to fasta file in TEMP for each TARGET
+	# combine all fasta sequences into a single file 
+	subprocess.call('cat {} {} >{}'.format(TEMP+'/*.fa', 'consensus', TEMP+"/"+LOCUS+'_unaligned.fa'), shell=True)
+	# align all sequences for this locus 
+	subprocess.call(MUSCLE_PATH + '/muscle -in {} -out {}'.format(TEMP+"/"+LOCUS+'_unaligned.fa', OUTDIR+"/"+LOCUS+'.fa'), shell=True)
+	print("-----------------------------------------------------------------------------")
+	files = glob.glob(TEMP + "/*")
+	for f in files:
+		os.remove(f)
+
