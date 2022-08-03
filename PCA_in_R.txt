@@ -1,0 +1,203 @@
+notes on making pcas from binary matrix of TE insertions
+
+use adegenet in R
+
+module load gnu7 R udunits geos gdal proj
+
+install.packages("adegenet")
+BiocManager::install("ggtree")
+library(ggtree)
+library(adegenet)
+library(ape)
+
+####### for pca scatter plot for TEs  #######
+mat <- read.table(file="/lustre/work/jkorstia/MELT/ves_phylip_21apr21.matrix", sep=",", header=FALSE, row.names=1)
+x=new("genlight", mat)
+pca_one <- glPca(x)
+Select the number of axes: 2
+eig.perc <- 100*pca_one$eig/sum(pca_one$eig)
+head(eig.perc)
+# 41.360110 16.231084 13.999613  8.219161  5.645878  4.372774
+jpeg('/lustre/work/jkorstia/MELT/RplotsPCA_noeigen.jpg', width=5, height=5, units='in', res=300)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE, cex=4, xlab="PC 1 (XX%)", ylab="PC 2 (XX%)")
+#text(pca_one$scores, labels=row.names(pca_one$scores))
+#add.scatter.eig(pca_one$eig[1:11],2,1,2, posi="bottomleft", inset=0.1, ratio=0.3)
+dev.off()
+
+###### for neighbor joining tree for TEs ######
+tre <- nj(dist(as.matrix(x)))
+tre2 <- root(tre, out=4)
+tre2 <- ladderize(tre2)
+jpeg('/lustre/work/jkorstia/MELT/nj_tree_small_dots.jpg', width=6.5, height=4, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+par(mar = c(1.1, 2.1, 2.1, 1.1))
+plot(tre2, type="unrooted", show.tip=TRUE, cex=.7)
+tiplabels(pch=20, col=myCol, cex=1)
+dev.off()
+
+###### for UCE analysis #############
+# concatenate all loci together, then begin in R
+#https://github.com/nylander/catfasta2phyml
+perl /lustre/work/jkorstia/uce/subtrees/BigBatch3/catfasta2phyml/catfasta2phyml.pl -c -f $(find ../mafft-nexus-min-75-taxa-fasta/ -type f -name '*.fasta') > concatenated.fasta
+# note: i changed all of the '?' in the alignments to be '-'
+
+
+##  IN R
+# i did this in an interactive login on quanah with 20 cores
+
+module load gnu7 R udunits geos gdal proj
+
+library(ggtree)
+library(adegenet)
+library(ape)
+
+fa=fasta2genlight('/lustre/work/jkorstia/uce/subtrees/BigBatch3/concatenated/concatenated_noq.fasta', quiet=FALSE, chunkSize = 1000, n.cores=36)
+pca_one <- glPca(fa, parallel=TRUE, n.cores=36)
+
+
+
+######## for concatenated UCE PCA #######
+use adegenet in R
+
+module load gnu7 R udunits geos gdal proj
+
+library(ggtree)
+library(adegenet)
+library(ape)
+
+fa=fasta2genlight('CaliCili.fasta', quiet=FALSE, chunkSize=1000, n.cores=10)
+pca_one <- glPca(fa, parallel=TRUE, n.cores=10)
+select number of axes: 2
+eig.perc <- 100*pca_one$eig/sum(pca_one$eig)
+#26.251108  9.610267  6.670789  4.706077  4.665199  4.601401
+jpeg('PCA_CaliCili_.jpg', width=5, height=5, units='in', res=300)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE, cex=4, xlab="PC 1 (26.25%)", ylab="PC 2 (9.6%)")
+#text(pca_one$scores, labels=row.names(pca_one$scores))
+add.scatter.eig(pca_one$eig[1:11],2,1,2, posi="bottomleft", inset=0.1, ratio=0.3)
+dev.off()
+
+
+## for subset PCAS
+
+module load gnu7 R udunits geos gdal proj
+
+library(dartR)
+library(ggtree)
+library(adegenet)
+library(ape)
+library(wordcloud)
+
+#############################################NIGRICANS
+
+fa=fasta2genlight('nigricans_group/nigricans_group.fasta', quiet=FALSE, chunkSize=1000, n.cores=36)
+
+pca_one <- glPca(fa, parallel=TRUE, n.cores=36)
+eig.perc <- 100*pca_one$eig/sum(pca_one$eig)
+jpeg('PCA_nigricans.jpg', width=5, height=5, units='in', res=300)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE, cex=4, xlab="PC 1 (8.94%)", ylab="PC 2 (6.7%)")
+
+#add.scatter.eig(pca_one$eig[1:11],2,1,2, posi="bottomleft", inset=0.1, ratio=0.3)
+dev.off()
+
+###### for neighbor joining tree for TEs ######
+tre <- nj(dist(as.matrix(fa)))
+#tre2 <- root(tre, out=4)
+tre <- ladderize(tre)
+jpeg('nj_nigricans.jpg', width=6.5, height=4, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+par(mar = c(1.1, 2.1, 2.1, 1.1))
+plot(tre, show.tip=TRUE, cex=0.5, label.offset=1, align.tip.label=TRUE)
+tiplabels(pch=20, col=myCol, cex=1.5)
+dev.off()
+
+jpeg('nj_nigricans_nolabel.jpg', width=3, height=5, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+plot(tre, show.tip=FALSE, use.edge.length=FALSE, cex=2)
+tiplabels(pch=20, col=myCol, cex=1.5)
+dev.off()
+
+
+#############################################ALBESCENS
+
+fa=fasta2genlight('albescens_group/albescens_group.fasta', quiet=FALSE, chunkSize=1000, n.cores=36)
+
+pca_one <- glPca(fa, parallel=TRUE, n.cores=36)
+eig.perc <- 100*pca_one$eig/sum(pca_one$eig)
+# 30.91649447 22.10812906 10.55016529  5.96702235  3.80207610  3.74222907
+jpeg('albescens_group/PCA_albescens.jpg', width=5, height=5, units='in', res=300)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE, cex=4, xlab="PC 1 (30.9%)", ylab="PC 2 (22.1%)")
+
+add.scatter.eig(pca_one$eig[1:11],2,1,2, posi="bottomleft", inset=0.1, ratio=0.3)
+dev.off()
+
+###### for neighbor joining tree for TEs ######
+tre <- nj(dist(as.matrix(fa)))
+#tre2 <- root(tre, out=4)
+tre <- ladderize(tre)
+jpeg('albescens_group/nj_albescens.jpg', width=6.5, height=4, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+plot(tre, show.tip=TRUE, cex=0.5, label.offset=1, align.tip.label=TRUE)
+tiplabels(pch=20, col=myCol, cex=1.5)
+dev.off()
+
+jpeg('albescens_group/nj_albescens_nolabel.jpg', width=3, height=5, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+plot(tre, show.tip=FALSE, use.edge.length=FALSE, cex=2)
+tiplabels(pch=20, col=myCol, cex=1.5)
+dev.off()
+
+#############################################RIPARIUS
+
+fa=fasta2genlight('riparius_group/riparius_group.fasta', quiet=FALSE, chunkSize=1000, n.cores=36)
+
+pca_one <- glPca(fa, parallel=TRUE, n.cores=36)
+eig.perc <- 100*pca_one$eig/sum(pca_one$eig)
+#  11.533919252  8.333090286  7.509180054  6.594288433  6.336039774
+jpeg('riparius_group/PCA_riparius.jpg', width=5, height=5, units='in', res=300)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE, cex=4, xlab="PC 1 (11.5%)", ylab="PC 2 (8.33%)")
+add.scatter.eig(pca_one$eig[1:11],2,1,2, posi="bottomright", inset=0.1, ratio=0.3)
+dev.off()
+
+###### for neighbor joining tree for TEs ######
+tre <- nj(dist(as.matrix(fa)))
+#tre2 <- root(tre, out=4)
+tre <- ladderize(tre)
+jpeg('riparius_group/nj_riparius.jpg', width=6.5, height=4, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+plot(tre, show.tip=TRUE, cex=0.5, label.offset=1, align.tip.label=TRUE)
+tiplabels(pch=20, col=myCol, cex=1.5)
+dev.off()
+
+jpeg('riparius_group/nj_riparius_nolabel.jpg', width=3, height=5, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+plot(tre, show.tip=FALSE, use.edge.length=FALSE, cex=2)
+tiplabels(pch=20, col=myCol, cex=1.5)
+dev.off()
+
+#############################################KEAYSI
+
+fa=fasta2genlight('keaysi_group/keaysi_group.fasta', quiet=FALSE, chunkSize=1000, n.cores=36)
+
+pca_one <- glPca(fa, parallel=TRUE, n.cores=36)
+eig.perc <- 100*pca_one$eig/sum(pca_one$eig)
+#  24.38760529 13.71830066  9.38770472  8.20614614  4.15202858  3.55253341
+jpeg('keaysi_group/PCA_keaysi.jpg', width=5, height=5, units='in', res=300)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE, cex=4, xlab="PC 1 (24.4%)", ylab="PC 2 (13.7%)")
+#add.scatter.eig(pca_one$eig[1:11],2,1,2, posi="topright", inset=-0.3, ratio=0.2)
+dev.off()
+
+###### for neighbor joining tree for TEs ######
+tre <- nj(dist(as.matrix(fa)))
+#tre2 <- root(tre, out=4)
+tre <- ladderize(tre)
+jpeg('keaysi_group/nj_keaysi.jpg', width=6.5, height=4, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+plot(tre, show.tip=TRUE, cex=0.5, label.offset=1, align.tip.label=TRUE)
+tiplabels(pch=20, col=myCol, cex=1.5)
+dev.off()
+
+jpeg('keaysi_group/nj_keaysi_nolabel.jpg', width=3, height=5, units='in', res=400)
+myCol <- colorplot(pca_one$scores,pca_one$scores, transp=TRUE)
+plot(tre, show.tip=FALSE, use.edge.length=FALSE, cex=2)
+tiplabels(pch=20, col=myCol, cex=1.5)
+dev.off()

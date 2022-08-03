@@ -1,0 +1,33 @@
+# this picks up where Sully's reorganizing script leaves off
+						###### 
+###  Find and replace jkorstia with your username in all these commands ###
+
+#######################################################################################
+
+# make ALL of the files end with .fa, so these will rename all .fas files in the _alignments directories to .fa
+
+cat /lustre/scratch/jkorstia/200mammals_rnd1/specieslist | while read i; do for f in /lustre/scratch/jkorstia/200mammals_rnd1/${i}/complete_alignments/*.fas; do mv -- "$f" "${f%.fas}.fa"; done; done
+cat /lustre/scratch/jkorstia/200mammals_rnd1/specieslist | while read i; do for f in /lustre/scratch/jkorstia/200mammals_rnd1/${i}/incomplete_alignments/*.fas; do mv -- "$f" "${f%.fas}.fa"; done; done
+cat /lustre/scratch/jkorstia/200mammals_rnd1/specieslist | while read i; do for f in /lustre/scratch/jkorstia/200mammals_rnd1/${i}/other_alignments/*.fas; do mv -- "$f" "${f%.fas}.fa"; done; done
+
+#######################################################################################
+### 		Create consensus file for incomplete and complete files 		###
+					#####################################
+					
+# this will automatically select all consensuses from the complete or incomplete folders 
+# and put them into a single .fa file in the consensus file and prints out some sanity check statements as it goes
+
+# requires that your new improved consensus contains "_cons" in the title- which all mine did by default
+######## You can modify the first grep command in this mess to fit your situation if your names are different (Sorry Austin)
+# note that it appends sequences to the consensus file, so if you need to run it again, delete the consensus files first
+
+# FOR INCOMPLETES
+cat /lustre/scratch/jkorstia/200mammals_rnd1/specieslist| while read i; do awk '/^>/ {printf("\n%s\n",$0);next; } { printf("%s",$0);}  END {printf("\n");}' /lustre/scratch/jkorstia/200mammals_rnd1/${i}/incomplete_alignments/*.fa | grep -A 1 "_cons" >> /lustre/scratch/jkorstia/200mammals_rnd1/${i}/consensuses/${i}_incomplete_rnd1.fa; echo number of incomplete elements in ${i} is; ls /lustre/scratch/jkorstia/200mammals_rnd1/${i}/incomplete_alignments/*.fa | wc -l ; echo the number of sequences in the ${i} combined consensus file is; grep ">" /lustre/scratch/jkorstia/200mammals_rnd1/${i}/consensuses/${i}_incomplete_rnd1.fa| wc -l; done
+# FOR COMPLETES
+cat /lustre/scratch/jkorstia/200mammals_rnd1/specieslist| while read i; do awk '/^>/ {printf("\n%s\n",$0);next; } { printf("%s",$0);}  END {printf("\n");}' /lustre/scratch/jkorstia/200mammals_rnd1/${i}/complete_alignments/*.fa | grep -A 1 "_cons" >> /lustre/scratch/jkorstia/200mammals_rnd1/${i}/consensuses/${i}_complete_rnd1.fa; echo number of complete elements in ${i} is; ls /lustre/scratch/jkorstia/200mammals_rnd1/${i}/complete_alignments/*.fa | wc -l ; echo the number of sequences in the ${i} combined consensus file is; grep ">" /lustre/scratch/jkorstia/200mammals_rnd1/${i}/consensuses/${i}_complete_rnd1.fa| wc -l; done
+
+#### Note: you may end up with more consensus sequences than files if you had to create multiple consensuses for an alignment
+
+############ 	DEGAP    #################
+#### this sed command works only on lines that DO NOT CONTAIN ">" and will therefore not damage the headers.
+cat specieslist | while read i; do sed -i '/^>/! s/-//g' /lustre/scratch/jkorstia/200mammals_rnd1/${i}/consensuses/${i}_complete_rnd1.fa; sed -i '/^>/! s/-//g' /lustre/scratch/jkorstia/200mammals_rnd1/${i}/consensuses/${i}_incomplete_rnd1.fa; done

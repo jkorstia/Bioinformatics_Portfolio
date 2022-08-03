@@ -1,0 +1,133 @@
+# this process has the steps for creating a new dataset using a subset of the original sample pool 
+# the goal here is to create a new tree focusing on a single clade
+
+
+cd /lustre/work/jkorstia/uce/subtrees/velifer_subtree
+
+
+########################### get match counts from sqlite file from prev step ##########################
+
+phyluce phyluce_assembly_get_match_counts \
+	--locus-db /lustre/work/jkorstia/uce/matchedContigs/probe.matches.sqlite \
+	--taxon-list-config /lustre/work/jkorstia/uce/subtrees/velifer_subtree/velifersubtree.conf \
+	--taxon-group 'velifer_subset' \
+	--output /lustre/work/jkorstia/uce/subtrees/velifer_subtree/velifer.conf \
+	--incomplete-matrix \
+	--log-path .
+	
+########################## get fastas from match counts ################################################
+## the incomplete matrix and output will be generated in this step, the other three options you should already have
+phyluce phyluce_assembly_get_fastas_from_match_counts \
+	--contigs /lustre/work/jkorstia/uce/trinity/trinity-assembly/contigs \
+	--locus-db /lustre/work/jkorstia/uce/matchedContigs/probe.matches.sqlite \
+	--match-count-output /lustre/work/jkorstia/uce/subtrees/velifer_subtree/velifer.conf \
+	--incomplete-matrix /lustre/work/jkorstia/uce/subtrees/velifer_subtree/velifer.incomplete \
+	--output /lustre/work/jkorstia/uce/subtrees/velifer_subtree/velifer_subtree_12Mar21.fasta
+
+########################### align UCEs and trim edges ################################################
+#default aligner is mafft
+# ran this in a qlogin with 32 processors
+# aligning took several hours. I left it overnight, so I'm not sure exactly how long it took.
+phyluce phyluce_align_seqcap_align \
+	--fasta /lustre/work/jkorstia/uce/allSamples/allSamples_23Sep.fasta \
+	--output mafft-nexus-edge-trimmed \
+	--taxa 379 \
+	--cores 32 \
+	--incomplete-matrix \
+	--log-path /lustre/work/jkorstia/uce/logs	
+	
+## the following steps are quick
+####################### fix names so things don't freak out later #####################################
+phyluce phyluce_align_remove_locus_name_from_nexus_lines \
+	--alignments /lustre/work/jkorstia/uce/mafft-nexus-edge-trimmed \
+	--output /lustre/work/jkorstia/uce/mafft-nexus-clean \
+	--cores 32	
+	
+###############  create nexus files for loci that are found in 75% of species #########################
+phyluce phyluce_align_get_only_loci_with_min_taxa \
+	--alignments  /lustre/work/jkorstia/uce/mafft-nexus-clean \
+	--taxa 379 \
+	--percent 0.75 \
+	--output /lustre/work/jkorstia/uce/mafft-nexus-min-75-taxa/ \
+	--cores 32	
+
+############## alignment stats ################################
+phyluce phyluce_align_get_align_summary_data \
+    --alignments mafft-nexus-edge-trimmed/ \
+	--show-taxon-counts \
+    --cores 32
+	
+---------------- Data matrix completeness summary ---------------
+2019-09-24 08:43:01,552 - phyluce_align_get_align_summary_data - INFO - [Matrix 50%]		3141 alignments
+2019-09-24 08:43:01,553 - phyluce_align_get_align_summary_data - INFO - [Matrix 55%]		3006 alignments
+2019-09-24 08:43:01,553 - phyluce_align_get_align_summary_data - INFO - [Matrix 60%]		2810 alignments
+2019-09-24 08:43:01,554 - phyluce_align_get_align_summary_data - INFO - [Matrix 65%]		2598 alignments
+2019-09-24 08:43:01,554 - phyluce_align_get_align_summary_data - INFO - [Matrix 70%]		2346 alignments
+2019-09-24 08:43:01,555 - phyluce_align_get_align_summary_data - INFO - [Matrix 75%]		2008 alignments
+2019-09-24 08:43:01,555 - phyluce_align_get_align_summary_data - INFO - [Matrix 80%]		1594 alignments
+2019-09-24 08:43:01,556 - phyluce_align_get_align_summary_data - INFO - [Matrix 85%]		945 alignments
+2019-09-24 08:43:01,556 - phyluce_align_get_align_summary_data - INFO - [Matrix 90%]		250 alignments
+2019-09-24 08:43:01,556 - phyluce_align_get_align_summary_data - INFO - [Matrix 95%]		17 alignments
+
+############### convert to fasta format for raxml   ##############
+phyluce phyluce_align_convert_one_align_to_another \
+    --alignments mafft-nexus-min-60-taxa/ \
+    --output mafft-nexus-min-60-taxa-fasta \
+    --input-format nexus \
+    --output-format fasta \
+    --cores 32 \
+    --log-path logs
+
+###############  build individual bootstrap trees for each UCE locus   ##################
+# I submitted each of these trees as a qsub (611 individual qsubs)
+#!/bin/sh
+#$ -V
+#$ -cwd
+#$ -S /bin/bash
+#$ -N raxmlQ
+#$ -o $JOB_NAME.o$JOB_ID
+#$ -e $JOB_NAME.e$JOB_ID
+#$ -q omni
+#$ -pe sm 36
+#$ -P quanah
+
+cd /lustre/work/jkorstia/uce/raxml_60_trees/
+
+/lustre/work/aosmansk/apps/standard-RAxML/raxmlHPC-PTHREADS \
+	-f a \
+	-T 36 \
+	-m GTRGAMMA \
+	-x 54981 \
+	-p 65849 \
+	-# 500 \
+	-s /lustre/work/jkorstia/uce/mafft-nexus-min-60-taxa-fasta/Q.fasta \
+	-n Q
+
+#############################################################################
+#####				
+
+### from the astral documentation
+
+###I didnt use this feature for my first preliminary tree, but should for the future ones.!!!!!!!!!!!!!!!!!
+
+
+#When multiple individuals from the same species are available, you can ask ASTRAL to force them to be together in the species tree. 
+#To do this, a mapping file needs to be provided using the -a option. This mapping file should have one line per species, and each line needs to be in one of two formats:
+#species_name [number of individuals] individual_1 individual_2 ...
+#
+#species_name:individual_1,individual_2,...
+#Note that when multiple individuals exist for the same species, your species name should be different from the individual names.
+
+# concatenate all of the "BestTree" files produced by raxml together to use as the input for ASTRAL
+cat RAxML_bestTree.uce-* > bestTree_all_cat
+
+
+############################## ASTRAL to infer species tree from bootstrap gene trees ############################
+module load java
+
+java \
+	-Xmx6G \
+	-jar /lustre/work/jkorstia/software/ASTRAL/astral.5.6.3.jar \
+	-i /lustre/work/jkorstia/uce/raxml_60_trees/bestTree_all_cat \
+	-o /lustre/work/jkorstia/uce/ASTRAL/astral_5Oct19.tre \
+	2> /lustre/work/jkorstia/uce/ASTRAL/astral_5Oct19.log
